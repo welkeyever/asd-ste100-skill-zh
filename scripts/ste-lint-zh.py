@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Deterministic linter for the structural rules in Chinese SKILL.md.
+"""Dependency-free, heuristic checks for Chinese technical prose.
 
-Checks only rules verifiable without a project dictionary. Deliberately never
+Scans surface patterns without a project dictionary. Deliberately never
 flags modality markers (可能/也许/或许/应该/会): confidence is content, and a
 linter that pressures modality out would rewrite claims.
 
@@ -13,7 +13,7 @@ Usage:
     ste-lint-zh.py --selftest
 
 Exit 1 when hard ("advisory-free") violations exceed the baseline (default 0).
-Advisory findings (passive-voice, aspect-marker) never fail the run.
+Context-dependent language findings are advisory and never fail the run.
 Exit 2 on a usage error (unknown flag, bad value, unknown rule, unreadable file).
 """
 import argparse
@@ -26,19 +26,15 @@ import re
 import sys
 import tempfile
 
-# Chinese character range used for word-count: CJK Unified Ideographs + fullwidth punctuation.
-# A character counts as 1 "word" for sentence-length purposes; ASCII words count as themselves.
+# CJK range used by language heuristics, not by the character counter.
 CJK = r"一-鿿"
-CJK_PUNCT = r"，。？！：；、"
-FULL_SENTENCE_END = r"。！？"
 
 # Modality markers that MUST NEVER be flagged. Keep this list stable; the selftest
 # depends on it. Add to it carefully — any addition widens the "do not flag" surface.
 MODALITY = ("可能", "也许", "或许", "大概", "应该", "可以", "会", "可能已经",
             "也许会", "或许会", "大概会", "应当", "将")
 
-# Buzzwords / Internet jargon that corrode technical writing. These are the Chinese
-# equivalents of the English "soft phrasal verbs" rule.
+# Candidate jargon; many terms also have legitimate domain meanings.
 BUZZWORDS = (
     "赋能", "打通", "拉通", "对齐", "下沉", "沉淀", "复盘",
     "抓手", "心智", "方法论", "生态位", "组合拳", "底座", "链路",
@@ -53,10 +49,12 @@ MARKETING_ADJECTIVES = (
     "颠覆性", "革命性", "划时代", "里程碑式", "现象级",
 )
 
-# "Light verb + noun" patterns — the Chinese equivalent of nominalization.
+# Candidate "light verb + noun" patterns.
 # Format: light verb followed by (optional "的", "一个", etc.) and a nominalized action noun.
-# This is more aggressive than the English version because the pattern is more mechanical in Chinese.
-LIGHT_VERBS = ("进行", "做出", "开展", "实施", "展开", "完成", "发出",
+# The intervening text is not parsed; all matches need contextual review.
+# 完成 carries completion, and 发出 can distinguish sending from receiving.
+# Neither is safe to treat as a filler verb.
+LIGHT_VERBS = ("进行", "做出", "开展", "实施", "展开",
                "作出", "给予", "予以", "加以")
 # Suffixes marking nominalized actions in Chinese.
 NOMINALIZED_SUFFIXES = ("分析", "处理", "部署", "优化", "检查", "审核", "审查",
@@ -81,11 +79,10 @@ PASSIVE_MARKER = re.compile(
     r"(" + "|".join(NOMINALIZED_SUFFIXES) + r"|删除|执行|调用|启动|停止|触发|创建|关闭)"
 )
 
-# Aspect-marker redundancy: "正在 X 中", "已经 X 了", "正在 X 过".
-# These are advisory because context sometimes justifies them.
+# Possible aspect-marker redundancy. Natural "已经 X 了" is not a target.
 ASPECT_REDUNDANCY = [
-    (re.compile(r"正在[" + CJK + r"]{1,6}?中"), "正在…中", "'正在' 和 '中' 表达重复，二选一。"),
-    (re.compile(r"已经[" + CJK + r"]{1,6}?了[^，。！？]"), "已经…了…", "'已经 … 了' 两个完成体标记重复，二选一。"),
+    (re.compile(r"正在[" + CJK + r"]{1,6}?中(?=[，。！？\s]|$)"),
+     "正在…中", "可能重复表达进行状态。确认 '中' 是状态标记后再简化，保留动作状态。"),
 ]
 
 # Chinese "的" stacking: three or more "X 的" phrases before a single noun.
@@ -94,18 +91,15 @@ DE_STACK = re.compile(
     r"(?:[" + CJK + r"a-zA-Z0-9]{1,8}的){3,}"
 )
 
-# "Noun cluster": 4 or more CJK characters followed by a noun suffix, with no 的
-# or verbs in between. This is deliberately conservative — Chinese noun compounds
-# are not strictly bounded by whitespace.
+# Candidate long noun phrase: this regex cannot identify nouns or count layers.
 NOUN_CLUSTER = re.compile(
     r"[" + CJK + r"]{4,}(?:器|层|模块|服务|组件|引擎|中心|平台|系统|协议|流程|策略)"
 )
 
-# Semicolons: both ASCII (;) and fullwidth (；). STE Rule 8.1 bans the mark.
+# Semicolons: both ASCII (;) and fullwidth (；), a local writing convention.
 SEMICOLON = re.compile(r"[;；]")
 
-# Synonym groups commonly rotated. Keep each group to genuinely interchangeable terms —
-# "错误 / 故障 / 异常" are distinct concepts and must stay out.
+# Candidate terms only: co-occurrence cannot establish referential identity.
 SYNONYM_GROUPS = [
     ("用户", "客户", "使用者", "操作员"),       # the human
     ("检查", "校验", "核对", "审核"),             # inspect
@@ -116,42 +110,44 @@ SYNONYM_GROUPS = [
     ("使用", "调用", "利用"),                      # use
     ("修复", "修正", "修理"),                      # fix
     ("发送", "传输", "推送"),                      # send
-    ("获取", "拉取", "读取", "取回"),             # fetch (读取 kept in because 读取 commonly means something specific — see note)
+    ("获取", "拉取", "读取", "取回"),             # may refer to different operations
     ("更改", "修改", "调整"),                      # change
     ("请求", "调用", "访问"),                      # request (note: 调用 also in 使用 group — that is OK, both groups flag it)
 ]
 
-# Sentence length caps (Chinese characters, including punctuation, excluding spaces).
-MAX_CHARS_DESCRIPTIVE = 50  # SKILL.md cap for descriptive text
-# Instructions cap (40) requires context awareness; linter uses the descriptive cap.
+# Project-local character budgets, not an English-to-Chinese conversion.
+MAX_CHARS_DESCRIPTIVE = 50
+# Instruction text can explicitly select a 40-character budget via --max-chars.
 
 RULES = [
     ("semicolon", "advisory-free",
      SEMICOLON,
-     "原规则 8.1 禁用分号。拆成独立句。"),
-    ("buzzword", "advisory-free",
+     "本项目建议拆开分号连接的句子。保留条件与各分支的对应关系。"),
+    ("buzzword", "advisory",
      re.compile("(" + "|".join(BUZZWORDS) + ")"),
-     "互联网黑话。删或替换成具体可测量的说法。"),
-    ("marketing-adjective", "advisory-free",
+     "可能是模糊用语。若为领域术语（如字节对齐、网络链路），保留。"),
+    ("marketing-adjective", "advisory",
      re.compile("(" + "|".join(MARKETING_ADJECTIVES) + ")"),
-     "营销形容词。删或替换成能支撑该说法的测量数据。"),
-    ("light-verb", "advisory-free",
+     "检查修饰语是否提供具体信息。只使用原文已有的事实，不补造数据。"),
+    ("light-verb", "advisory",
      LIGHT_VERB_PATTERN,
-     "虚化动词 + 名词化。直接用动词（如 '分析'，不是 '进行分析'）。"),
-    ("de-stacking", "advisory-free",
+     "可能有虚化动词。确认不改变动作、状态和情态后再简化。"),
+    ("de-stacking", "advisory",
      DE_STACK,
-     "'的' 字堆叠（≥3 个 '的' 字短语连续堆到名词前）。把定语后置或拆句。"),
-    ("noun-cluster", "advisory-free",
+     "可能有 '的' 字堆叠。确认修饰关系难以理解时再拆句，保留原来的修饰范围。"),
+    ("noun-cluster", "advisory",
      NOUN_CLUSTER,
-     "名词连用过长。拆成 '处理 X 的 Y' 结构。"),
+     "可能有过长定语或复合名词。此正则不能判断名词层数，请结合领域含义复核。"),
     ("passive-voice", "advisory",
      PASSIVE_MARKER,
      "可能的被动语态。改成主动句，除非施事者未知或无关。"),
 ]
 
 
-CODE_FENCE = re.compile(r"^(```|~~~)")
-INLINE_CODE = re.compile(r"`[^`]*`")
+CODE_FENCE = re.compile(r"^\s*(?P<run>`{3,}|~{3,})(?P<tail>.*)$")
+# A sentinel preserves offsets and prevents a code-ending list item from being
+# mistaken for a dangling conjunction. It is excluded from character counts.
+MASK = "\ufffc"
 # List markers: Markdown unordered (-/*/+) and numeric (1./1)/1、). Chinese ordinal 1、 is common.
 LIST_ITEM_START = re.compile(
     r"^(?P<indent> {0,3})(?P<marker>[-*+]|[0-9]+[.)、])(?P<gap> +)(?P<body>.*)$"
@@ -161,26 +157,93 @@ TABLE_SEPARATOR_CELL = re.compile(r"^:?-{3,}:?$")
 STANDALONE_LINE = re.compile(r"^ {0,3}(?:#|<|(?:[-*_=] *){3,}$)")
 BLOCKQUOTE_PREFIX = re.compile(r"^ {0,3}(?:> ?)+")
 ANY_LIST_ITEM = re.compile(r"^\s*(?:[-*+]|[0-9]+[.)、])(?:\s|$)")
-# Chinese sentence enders: 。！？ plus fullwidth variants and ASCII fallback.
-SENTENCE_END = re.compile(r"[" + FULL_SENTENCE_END + r"][\"'”’)\]*_]*$|[.!?][\"'”’)\]*_]*$")
-OPENERS = "\"'“‘（([*_"
 
 
 def _char_count(text):
-    """Count all non-space characters. 1 CJK char = 1 unit; 1 ASCII char = 1 unit.
+    """Count non-space, non-masked Unicode code points, including punctuation."""
+    return sum(1 for c in text if not c.isspace() and c != MASK)
 
-    This matches the SKILL.md definition: '字数口径: 中文字符数, 含标点但不含空格'.
+
+def _mask(text):
+    return "".join(c if c.isspace() else MASK for c in text)
+
+
+def _prose_lines(text):
+    """Mask non-prose once for every rule, preserving source line/column offsets.
+
+    Supports backtick/tilde fences (including longer outer fences), inline code
+    with matching delimiter lengths, leading YAML frontmatter and HTML comments.
+    This is intentionally a Markdown subset, not a full CommonMark parser.
     """
-    return sum(1 for c in text if not c.isspace())
+    lines = text.splitlines(keepends=True)
+    fence = None
+    inline_end = None
+    in_comment = False
+    offset = 0
+    frontmatter = bool(lines and lines[0].strip() == "---"
+                       and any(line.strip() in ("---", "...") for line in lines[1:]))
+    for index, line in enumerate(lines):
+        line_offset = offset
+        offset += len(line)
+        if frontmatter:
+            lines[index] = _mask(line)
+            if index and line.strip() in ("---", "..."):
+                frontmatter = False
+            continue
+        quote = BLOCKQUOTE_PREFIX.match(line)
+        content = line[quote.end():] if quote else line
+        match = CODE_FENCE.match(content.rstrip("\r\n"))
+        if fence:
+            lines[index] = _mask(line)
+            if (match and match['run'][0] == fence[0]
+                    and len(match['run']) >= fence[1] and not match['tail'].strip()):
+                fence = None
+            continue
+        if (not in_comment and inline_end is None and match
+                and not (match['run'][0] == '`' and '`' in match['tail'])):
+            fence = (match['run'][0], len(match['run']))
+            lines[index] = _mask(line)
+            continue
 
-
-def _mask_inline_code(text):
-    """Blank code spans with equal-length spaces so columns stay true."""
-    return INLINE_CODE.sub(lambda m: " " * len(m.group(0)), text)
+        # Walk inline code and comments in source order. Delimiters inside one
+        # protected region must not open a different region and hide later prose.
+        masked = list(line)
+        cursor = 0
+        while cursor < len(line):
+            if in_comment:
+                closing = line.find('-->', cursor)
+                end = closing + 3 if closing >= 0 else len(line)
+                masked[cursor:end] = _mask(line[cursor:end])
+                in_comment = closing < 0
+                cursor = end
+            elif inline_end is not None:
+                closing = inline_end.search(line, cursor)
+                end = closing.end() if closing else len(line)
+                masked[cursor:end] = _mask(line[cursor:end])
+                if closing:
+                    inline_end = None
+                cursor = end
+            else:
+                token = re.search(r'<!--|`+', line[cursor:])
+                if not token:
+                    break
+                start, end = cursor + token.start(), cursor + token.end()
+                if token.group() == '<!--':
+                    in_comment = True
+                    cursor = start
+                else:
+                    delimiter = re.compile(r'(?<!`)' + re.escape(token.group()) + r'(?!`)')
+                    # An unmatched opening run is literal prose, not code.
+                    if delimiter.search(text, line_offset + end):
+                        inline_end = delimiter
+                        masked[start:end] = _mask(line[start:end])
+                    cursor = end
+        lines[index] = ''.join(masked)
+    return ''.join(lines).splitlines()
 
 
 def _sentence_starts(text):
-    """Return byte offsets where sentences start.
+    """Return Unicode character offsets where sentences start.
 
     Chinese sentences end at 。！？. ASCII .!? also end a sentence when followed
     by whitespace or end-of-string. Returns a list of start offsets.
@@ -219,7 +282,7 @@ def _sentence_starts(text):
     return starts
 
 
-def _long_sentence_findings(pieces, filename):
+def _long_sentence_findings(pieces, filename, max_chars):
     """Flag long sentences in one prose block.
 
     pieces is a list of (lineno, source_column, text) tuples. The texts are
@@ -236,7 +299,7 @@ def _long_sentence_findings(pieces, filename):
     starts = _sentence_starts(joined)
     for start, end in zip(starts, starts[1:] + [len(joined)]):
         n = _char_count(joined[start:end])
-        if n <= MAX_CHARS_DESCRIPTIVE:
+        if n <= max_chars:
             continue
         index = bisect.bisect_right(offsets, start) - 1
         offset = offsets[index]
@@ -245,7 +308,7 @@ def _long_sentence_findings(pieces, filename):
                          "col": source_column + start - offset + 1,
                          "rule": "long-sentence", "level": "advisory-free",
                          "match": f"{n} 字",
-                         "message": f"句子长 {n} 字（上限 {MAX_CHARS_DESCRIPTIVE} 字）。拆开。"})
+                         "message": f"句子长 {n} 字（预算 {max_chars} 字）。可拆句，但须保留条件、例外和作用域。"})
     return findings
 
 
@@ -309,22 +372,12 @@ def _markdown_table_cells(lines):
     return table_cells
 
 
-def _dangling_conjunction_findings(text, filename):
+def _dangling_conjunction_findings(lines, filename, source_lines):
     """List items that end with 并/或/和/与/且."""
-    lines = text.splitlines()
     findings = []
-    in_fence = False
     index = 0
     while index < len(lines):
         line = lines[index]
-        stripped = line.strip()
-        if CODE_FENCE.match(stripped):
-            in_fence = not in_fence
-            index += 1
-            continue
-        if in_fence:
-            index += 1
-            continue
         start = LIST_ITEM_START.match(line)
         if not start:
             index += 1
@@ -334,24 +387,15 @@ def _dangling_conjunction_findings(text, filename):
                           + len(start.group("gap")))
         item_lines = [(index, start.group("body"))]
         next_index = index + 1
-        item_fence = False
         while next_index < len(lines):
             candidate = lines[next_index]
-            candidate_stripped = candidate.strip()
-            if CODE_FENCE.match(candidate_stripped):
-                item_fence = not item_fence
-                next_index += 1
-                continue
-            if item_fence:
-                next_index += 1
-                continue
             if not _is_list_continuation(candidate, content_indent):
                 break
             item_lines.append((next_index, candidate))
             next_index += 1
         meaningful = []
         for line_index, item_line in item_lines:
-            cleaned = INLINE_CODE.sub(" CODE ", item_line).strip()
+            cleaned = item_line.strip()
             if cleaned:
                 meaningful.append((line_index, cleaned))
         if meaningful:
@@ -368,10 +412,7 @@ def _dangling_conjunction_findings(text, filename):
                     raw for line_index, raw in item_lines
                     if line_index == end_line_index
                 )
-                masked = INLINE_CODE.sub(
-                    lambda m: " " * len(m.group(0)), raw_end_line
-                )
-                raw_conjunction = CONJUNCTION_END.search(masked)
+                raw_conjunction = CONJUNCTION_END.search(raw_end_line)
                 finding_line = end_line_index + 1
                 finding_col = raw_conjunction.start() + 1 if raw_conjunction else 1
             findings.append({
@@ -380,7 +421,8 @@ def _dangling_conjunction_findings(text, filename):
                 "col": finding_col,
                 "rule": "dangling-conjunction",
                 "level": "advisory-free",
-                "match": end_line,
+                "match": source_lines[end_line_index][start.start('body'):].strip()
+                         if end_line_index == index else source_lines[end_line_index].strip(),
                 "message": "列表项以连词（并/或/和/与/且）结尾。补完此项，或与下一项合并。",
             })
         index = next_index
@@ -388,7 +430,7 @@ def _dangling_conjunction_findings(text, filename):
 
 
 def _aspect_redundancy_findings(line, lineno, source_column, filename):
-    """Advisory: redundant aspect markers like '正在…中' or '已经…了'."""
+    """Advisory candidates for repeated progressive-state markers."""
     findings = []
     for pattern, label, msg in ASPECT_REDUNDANCY:
         for m in pattern.finditer(line):
@@ -415,26 +457,22 @@ def _is_modality_context(text, pos):
     return False
 
 
-def lint(text, filename="<stdin>"):
+def lint(text, filename="<stdin>", max_chars=MAX_CHARS_DESCRIPTIVE):
     findings = []
     chars_total = 0
-    in_fence = False
-    lines = text.splitlines()
+    lines = _prose_lines(text)
     table_cells = _markdown_table_cells(lines)
     seen_synonyms = {}  # (group_idx, base) -> (line, col, match)
     block = []
     in_quote = False
 
     def flush():
-        findings.extend(_long_sentence_findings(block, filename))
+        findings.extend(_long_sentence_findings(block, filename, max_chars))
         block.clear()
 
     for lineno, raw_line in enumerate(lines, 1):
-        if CODE_FENCE.match(raw_line.strip()):
+        if raw_line and all(c.isspace() or c == MASK for c in raw_line):
             flush()
-            in_fence = not in_fence
-            continue
-        if in_fence:
             continue
         segments = table_cells.get(lineno - 1, [(raw_line, 0)])
         is_table = (lineno - 1) in table_cells
@@ -448,7 +486,16 @@ def lint(text, filename="<stdin>"):
         in_quote = is_quote
 
         for segment, source_column in segments:
-            line = _mask_inline_code(segment)
+            line = segment
+            if not is_table:
+                prefix = BLOCKQUOTE_PREFIX.match(line)
+                if prefix:
+                    source_column += prefix.end()
+                    line = line[prefix.end():]
+                prefix = re.match(r"\s*(?:#{1,6}\s+|(?:[-*+]|[0-9]+[.)、])\s+)", line)
+                if prefix:
+                    source_column += prefix.end()
+                    line = line[prefix.end():]
             chars_total += _char_count(line)
 
             for rule_id, level, pattern, msg in RULES:
@@ -477,9 +524,8 @@ def lint(text, filename="<stdin>"):
                             lineno, source_column + pos + 1, base
                         )
 
-            skip = quote.end() if quote and not is_table else 0
-            if line[skip:].strip():
-                block.append((lineno, source_column + skip, line[skip:]))
+            if line.strip():
+                block.append((lineno, source_column, line))
             if is_table:
                 flush()
         if standalone:
@@ -495,12 +541,12 @@ def lint(text, filename="<stdin>"):
             for (lineno, col, match), base in present[1:]:
                 findings.append({
                     "file": filename, "line": lineno, "col": col,
-                    "rule": "synonym-rotation", "level": "advisory-free",
+                    "rule": "synonym-rotation", "level": "advisory",
                     "match": match,
-                    "message": f"'{base}' 和 '{first_base}' 指同一对象。挑一个，用到底。",
+                    "message": f"'{base}' 和 '{first_base}' 同时出现。仅在确认指同一对象、同一动作时统一，保留领域区别。",
                 })
 
-    findings.extend(_dangling_conjunction_findings(text, filename))
+    findings.extend(_dangling_conjunction_findings(lines, filename, text.splitlines()))
     findings.sort(key=lambda f: (f["line"], f["col"]))
     return findings, chars_total
 
@@ -514,10 +560,10 @@ def report(findings, chars_total, as_json, hard_count, baseline):
                          indent=2, ensure_ascii=False))
         return
     for f in findings:
-        print(f"{f['file']}:{f['line']}:{f['col']} {f['rule']}: {f['message']} [{f['match']}]")
-    print(f"\n{len(findings)} 处违反（硬违反 {hard_count}，基线 {baseline}），"
+        print(f"{f['file']}:{f['line']}:{f['col']} {f['rule']} ({f['level']}): {f['message']} [{f['match']}]")
+    print(f"\n{len(findings)} 条提示（硬检查 {hard_count}，基线 {baseline}），"
           f"共 {chars_total} 字，每百字 {rate} 处。")
-    print("情态词（可能/也许/或许/应该/会）永远不会被标记：信心度是内容，不是风格。")
+    print("提示数量不是质量评分。情态词本身不触发规则，改写仍需人工或模型复核语义。")
 
 
 def selftest():
@@ -538,7 +584,7 @@ def selftest():
     assert "marketing-adjective" in rules, findings
 
     # 3. Light verb + nominalization gets flagged.
-    text = "对日志进行分析。完成服务的部署。发出用户通知。"
+    text = "对日志进行分析。开展服务测试。做出判断。"
     findings, _ = lint(text)
     light = [f for f in findings if f["rule"] == "light-verb"]
     assert len(light) >= 3, light
@@ -694,6 +740,13 @@ def _non_negative_int(value):
     return n
 
 
+def _positive_int(value):
+    n = _non_negative_int(value)
+    if n == 0:
+        raise argparse.ArgumentTypeError("需要正整数")
+    return n
+
+
 def main(argv):
     parser = argparse.ArgumentParser(
         prog="ste-lint-zh.py", allow_abbrev=False,
@@ -705,6 +758,8 @@ def main(argv):
     parser.add_argument("--disable", type=_rule_list, default=set(), metavar="RULES",
                         help="逗号分隔的规则 ID，关闭这些检查")
     parser.add_argument("--selftest", action="store_true", help="运行内置测试")
+    parser.add_argument("--max-chars", type=_positive_int, default=MAX_CHARS_DESCRIPTIVE,
+                        metavar="N", help="句长预算（默认 50，指令文本可选 40）")
     args = parser.parse_intermixed_args(argv)
     if args.selftest:
         selftest()
@@ -717,13 +772,18 @@ def main(argv):
             try:
                 with open(p, encoding="utf-8") as fh:
                     text = fh.read()
-            except OSError as e:
-                parser.error(f"无法读取 {p}: {e.strerror}")
-            f, w = lint(text, filename=p)
+            except (OSError, UnicodeError) as e:
+                parser.error(f"无法读取 UTF-8 文件 {p}: {e}")
+            f, w = lint(text, filename=p, max_chars=args.max_chars)
             findings.extend(f)
             chars_total += w
     else:
-        findings, chars_total = lint(sys.stdin.read())
+        try:
+            text = (sys.stdin.buffer.read().decode("utf-8")
+                    if hasattr(sys.stdin, "buffer") else sys.stdin.read())
+            findings, chars_total = lint(text, max_chars=args.max_chars)
+        except (OSError, UnicodeError) as e:
+            parser.error(f"无法读取 UTF-8 输入: {e}")
 
     findings = [f for f in findings if f["rule"] not in disabled]
     hard_count = sum(1 for f in findings if f["level"] == "advisory-free")

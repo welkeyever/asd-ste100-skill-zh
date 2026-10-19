@@ -1,145 +1,169 @@
-# 简化中文技术写作 Skill — Simplified Chinese Technical Writing
+# 简化中文技术写作 Skill
 
-一个把 **ASD-STE100 简化技术英语**（Simplified Technical English）的方法论迁移到中文的 Claude Code skill：**用一句一指令、短句、主动语态、术语一致、动作用动词**的方式，消除下游 agent / 翻译管线 / 非母语读者解析中文时的歧义。
+**保留原意，把中文技术文本写清楚。** 适用于工具描述、Agent 指令、错误信息、系统提示和技术文档。
 
-这不是 ASD-STE100 的翻译版——英文的歧义来源（短语动词、现在完成时、第三人称 -s）和中文的歧义来源（"的"字堆叠、零主语、体标记混用、互联网黑话、中英混排）只有部分重叠。本 skill**替换**了不适用的英文规则、**新增**了中文独有的坑，详见 [`references/writing-rules.md`](references/writing-rules.md) 里的逐条决策说明。
+A meaning-preserving Chinese technical writing skill, inspired by ASD-STE100.
 
-## 为什么这件事值得做
+[快速开始](#快速开始) · [改写示例](examples/before-after.md) · [Linter](references/linter.md) · [效果评估](evals/README.md) · [贡献指南](CONTRIBUTING.md)
 
-ASD-STE100 的来源：航空维修手册的读者多数不是英文母语者，一条指令被误读在飞机上会死人。规则很直白——一词一义、主动语态、简单时态、一句一指令、不省主谓宾。
+## 看一个例子
 
-LLM Agent 消费另一个 Agent 的输出时处境极为相似：没有旁路、没法反问"你说的 X 是指 A 还是 B"。同一套规则，用来保护机务不误读扭矩规格的，拿来保护下游 agent 不误读工具描述、Agent 间指令、错误信息、系统提示——完全成立。
+**改前**
 
-中文的工具描述、tool call 参数说明、系统 prompt 大面积塞满"进行 / 做出 / 发出" + 名词化的赘述、"的字" 堆叠的长定语、互联网黑话、以及中英混用的术语漂移。本 skill 正是打这些点。
+> 只有当上游任务已经完成且没有报错时，下游 Agent 才应该继续读取输出制品，但是超时的时候有时会产生部分制品。
 
-## Before / After
+**改后**
 
-| Before | After |
+> 只有上游任务已完成且未报错时，下游 Agent 才应该继续读取输出制品。超时时，有时会产生部分制品。
+
+改写保留了条件、完成状态、“应该”和“有时”。它不会把“可能失败”改成“失败”，也不会为一个含糊的“否则”擅自选择解释。[查看更多示例](examples/before-after.md)。
+
+## 你会得到什么
+
+- **一个写作 Skill**：让支持 Agent Skills 的助手按语义约束重写或审查中文。默认只返回改后文本，也可以要求解释改动。
+- **一个可独立使用的 linter**：用 Python 标准库定位分号、长句和可疑表达。它只读文件，不调用模型，也不自动改写。
+- **可审查的规则和案例**：说明何时简化、何时保留，以及如何比较不同版本的输出。
+
+项目优先级是：**语义保真 > 指代和条件清晰 > 术语一致 > 句子简短**。目标是减少表达歧义；目前没有实验数据证明它能降低下游 Agent 的错误率。
+
+本项目受 ASD-STE100 简化技术英语启发，是中文适配项目，不是官方中文版或合规认证工具。中文规则和 40 / 50 字预算均为本项目约定，详见[设计依据](references/writing-rules.md)。
+
+## 快速开始
+
+### 使用 npx 安装（推荐）
+
+需要 Git、Node.js 和 npm。运行以下命令，按提示选择助手和安装范围：
+
+```bash
+npx skills add welkeyever/asd-ste100-skill-zh
+```
+
+默认安装到当前项目。若要安装到个人 Claude Code，供所有项目使用：
+
+```bash
+npx skills add welkeyever/asd-ste100-skill-zh \
+  --skill asd-ste100-zh --agent claude-code --global --yes
+```
+
+只查看仓库中的 skill，不安装：
+
+```bash
+npx skills add welkeyever/asd-ste100-skill-zh --list
+```
+
+安装器直接从 GitHub 读取 skill，无需单独发布 npm 包。选项与环境要求以 [skills CLI 官方说明](https://github.com/vercel-labs/skills#readme)为准。本次验证使用的 `skills@1.7.2` 要求 Node.js ≥22.20.0。
+
+### 使用 Git 手动安装
+
+需要 Git。以下命令安装到个人 skills 目录，供所有项目使用：
+
+```bash
+mkdir -p ~/.claude/skills
+git clone https://github.com/welkeyever/asd-ste100-skill-zh.git \
+  ~/.claude/skills/asd-ste100-zh
+```
+
+如果只想在一个项目启用，将克隆目标改成该项目的 `.claude/skills/asd-ste100-zh`。[Claude Code 官方说明](https://code.claude.com/docs/en/skills)介绍了个人和项目级 skill 的加载方式。
+
+### 第一次使用
+
+安装后，在 Claude Code 中调用：
+
+```text
+/asd-ste100-zh
+
+请重写下面的工具说明，只返回改后文本：
+本工具可能会对返回结果进行检查，并在发现格式错误时发出通知。
+```
+
+一种符合规则的输出：
+
+```text
+本工具可能会检查返回结果，并在发现格式错误时发出通知。
+```
+
+这里保留同一句中的“可能会”，避免拆句时把通知动作变成无条件承诺。
+
+### 其他助手与手动使用
+
+本仓库使用 [Agent Skills 格式](https://agentskills.io/specification)。其他客户端应按各自说明安装整个目录，目录名使用 `asd-ste100-zh`，保留 `references/`、`examples/` 和 `scripts/` 的相对位置。未逐一验证各客户端的自动发现和调用行为。
+
+不安装也可以把 [SKILL.md](SKILL.md) 作为写作指引，并把待改写文本交给助手。只使用写作指引时不需要 Python。
+
+### 独立试用 linter
+
+需要 Python 3.10+，无需安装依赖。在克隆的仓库目录运行：
+
+```bash
+printf '任务已启动；等待执行。\n' | python3 scripts/ste-lint-zh.py
+```
+
+这条示例会报告分号，退出码为 `1`。读取真实文件：
+
+```bash
+python3 scripts/ste-lint-zh.py --json path/to/doc.md
+```
+
+`path/to/doc.md` 替换成你要检查的 UTF-8 文件路径。退出码 `0` 表示硬检查未超过预算，`1` 表示超过，`2` 表示参数或输入错误。**退出码 `0` 不代表文本语义正确。**
+
+## 如何使用
+
+| 需求 | 提示示例 | 输出 |
+|---|---|---|
+| 直接重写 | 按简化中文规则重写这段工具说明 | 改后正文；必要时说明未解歧义 |
+| 查看依据 | 重写这段 README，并解释改动 | 正文及原文 / 改后 / 理由表 |
+| 只审查 | 检查这段 Agent 指令的歧义，先不改写 | 问题位置、原因和建议 |
+| 约束术语 | 重写下面的说明，保留“租户”“工作区”和所有字段名 | 在这些约束内改写 |
+
+操作步骤与接口说明默认使用**严格模式**，强调动作和条件。README 与解释性正文默认使用**偏意模式**，保留叙述节奏。两者都必须保留事实、情态、状态、范围和领域区别。
+
+已有文本足够清楚时，默认原样返回。营销文案、文学创作和翻译不属于本项目的主要用途。
+
+## Linter 能做什么
+
+| 检查类型 | 行为 |
 |---|---|
-| "本工具会尝试在已经被配置的各个后端之间进行状态的同步，如果检测到冲突可能会根据已经设定好的策略来自动进行解决，否则会把冲突暴露出来以供人工审查。" | "本工具尝试同步已配置后端之间的状态。如果检测到冲突，工具按预设策略处理：允许自动解决时，工具可能自动解决冲突；不允许时，工具把冲突报告给人工审查。" |
-| "由于预期的数据格式可能存在不匹配的问题，在处理您的请求的过程中可能发生了错误，这有可能是由于客户端版本过旧所引起的。" | "处理请求时可能发生了错误。原因可能是数据格式不符合服务端预期。过旧的客户端版本可能导致这种不匹配。请检查客户端版本。" |
+| 分号、句长、列表项悬挂连词 | 计入硬检查。可用 `--baseline N` 放宽数量预算，或 `--disable` 关闭某条规则 |
+| 可疑黑话、修饰语、虚化动词、定语、术语变化、被动和体标记 | 仅建议，不影响退出码；需要结合上下文判断 |
+| 事实、条件作用域、隐含主体、改写前后含义 | 无法验证，需要模型或人工复核 |
 
-更多例子（工具描述 / 错误信息 / Agent 间指令 / README 四类）见 [`examples/before-after.md`](examples/before-after.md)。
+```bash
+# 默认句长预算 50 字；操作说明可选 40 字
+python3 scripts/ste-lint-zh.py --max-chars 40 instructions.md
 
-## 这个 Skill 做什么
+# 容许存量的 3 条硬检查提示（数量预算，不是逐条豁免）
+python3 scripts/ste-lint-zh.py --baseline 3 doc.md
 
-1. **挑模式**。**严格模式**覆盖操作步骤、错误信息、Agent 间指令、工具描述。**偏意模式**覆盖 README、PR 描述、解释性正文——保留结构规则但放松术语严格一致。
-2. **通读原文**理解在说什么。
-3. **逐句过规则**。标出每条违反：虚化动词 + 名词化、"的"字堆叠、名词连用超限、禁分号、流水句、情态堆叠、互联网黑话、营销词、同义词轮换、体标记混用、句长超限、零主语歧义、被动语态滥用。
-4. **逐句改写**——不改变原文事实、条件、作用域限定、情态强度。遇到简化会丢精度的地方，**保留较长说法并标记**，不默默简化。
-5. **输出改后文本**——默认只输出结果，不加寒暄、不加模式声明、不加规则表。刻意保留的部分加一行 `保留原文:` 说明。
+# 关闭指定规则
+python3 scripts/ste-lint-zh.py --disable noun-cluster,synonym-rotation doc.md
+```
 
-用户要规则表（"解释改了什么"/"diff"/"before/after"）时，输出命中规则的表格。
+linter 跳过代码围栏、行内代码、文件开头的 YAML frontmatter 和 HTML 注释。它只支持部分 Markdown 结构，不是完整的语法解析器。规则 ID、JSON 字段、计数口径及限制见 [linter 说明](references/linter.md)。
 
-结构规则是机械可核的——你可以指着具体词或标点说"这里违反了哪条"。靠项目词表的规则（术语一致）标为建议而非强制。靠语感的规则（文体转换）不在 skill 范围内。
+## 如何判断有效
 
-## 规则范围（和原 ASD-STE100 的区别）
+先检查**有没有改变含义**，再检查表达是否更清楚。不能用“字数更少”或“lint 全绿”证明改写有效。
 
-| 原 ASD-STE100 规则 | 本 skill 处理 |
+- 脚本回归：`python3 -m unittest discover -s tests -v`
+- 内置自检：`python3 scripts/ste-lint-zh.py --selftest`
+- 改写效果：用[评估案例和方法](evals/README.md)比较开启 / 未开启 skill 的输出，记录模型、版本及语义差错。
+
+GitHub Actions 配置会运行脚本自检和回归测试。模型改写效果需单独评估，目前未发布模型对照成绩。
+
+## 文档与贡献
+
+| 文件 | 用途 |
 |---|---|
-| 词汇规则（基于 ~900 词已批准词典） | **放弃词典依赖**——中文无一对一映射。保留"每次用同一个词 / 挑最常用的词"原则。 |
-| 一词一义、术语一致 | **保留** |
-| 动词形式优先于名词化（Rule 3.7） | **保留并强化**——中文版的"虚化动词 + 名词化"（"进行分析"/"完成部署"）比英文的 nominalization 更泛滥。 |
-| 禁短语动词（Rule 9.3，如 "take off"） | **替换**——中文无短语动词，对应到"禁虚化动词 + 名词化"。 |
-| 简单时态（禁 present perfect 等） | **替换**——中文无时态，对应到"体标记一致"（避免"正在…中"/"已经…了"）。 |
-| 主动语态优先 | **保留并扩展**——中文除"被字句"外还有"受事主语句"（施事者缺失），都要防。 |
-| 一句一指令 | **保留** |
-| 句长 ≤ 20/25 词 | **换算成汉字**：指令 ≤ 40 字，描述 ≤ 50 字。 |
-| 禁分号（Rule 8.1） | **保留** |
-| 名词连用 ≤ 3 层 | **保留** |
-| 禁省略 | **保留并强调**——中文允许零主语，agent-facing 文本不该省。 |
-| 段 ≤ 6 句、流程用列表 | **保留** |
-| （无） | **新增**："的"字堆叠（≥3 个"的"字短语堆到名词前） |
-| （无） | **新增**：中英文术语二选一（同文档不混用 request/请求、server/服务器） |
-| （无） | **新增**：互联网黑话过滤（赋能 / 打通 / 拉通 / 落地 / 对齐 / 下沉 / 复盘 / …） |
-| （无） | **新增**：四字格 / 成语在技术文本里禁用（信息密度低、意义模糊） |
+| [SKILL.md](SKILL.md) | 助手执行的改写规则与输出约定 |
+| [规则设计依据](references/writing-rules.md) | 中文适配、取舍和来源 |
+| [改写示例](examples/before-after.md) | 正常改写、保留原文、待澄清情况 |
+| [贡献指南](CONTRIBUTING.md) | 报告误报、提交规则和验证改动 |
+| [设计审查记录](docs/design-review.md) | 本轮问题、方案比较和实施范围 |
 
-## 安装
+欢迎提交真实的误报、改写语义变化或难以理解的文档段落。请附最小输入、实际输出和期望含义；涉及内部资料时先匿名化。
 
-### 克隆到项目 skills 目录
+## 来源与许可
 
-```bash
-git clone https://github.com/<your-fork>/asd-ste100-skill-zh ~/.claude/skills/asd-ste100-zh
-```
+基于 [danyuchn/asd-ste100-skill](https://github.com/danyuchn/asd-ste100-skill) 的结构和思路做中文适配，并参考 [ASD-STE100](https://www.asd-ste100.org/) 及中文技术写作资料。具体来源见 [CREDITS.md](CREDITS.md)。
 
-这会把 skill 装到 `~/.claude/skills/`，所有 Claude Code 项目都能用。
-
-### npx skills（如发布到 skills.sh）
-
-```bash
-npx skills add <your-fork>/asd-ste100-skill-zh
-```
-
-## 用法
-
-触发词（任选）：
-
-```
-把这段中文改一下让 agent 读不出歧义
-应用简化中文规则到这段 prompt
-plain Chinese 重写这段 tool description
-中文消歧
-受控中文改写
-```
-
-或者直接粘贴中文让 Claude："按简化中文重写" / "降低这段的歧义" / "按 asd-ste100-zh 改写"。
-
-默认只返回改后文本。想看规则表加 "展示改动" / "diff 一下" / "解释改了什么"。
-
-## Linter
-
-`scripts/ste-lint-zh.py` 是不依赖任何外部库（Python 标准库 only）的结构规则 linter，覆盖：分号、句长（按汉字计）、虚化动词 + 名词化、"的"字堆叠、互联网黑话、营销词、名词连用、同义词轮换、体标记混用、被动语态、列表项悬挂连词。
-
-```bash
-# 单文件
-python scripts/ste-lint-zh.py path/to/doc.md
-
-# stdin
-echo "本工具会尝试进行同步" | python scripts/ste-lint-zh.py
-
-# JSON 输出
-python scripts/ste-lint-zh.py --json doc.md
-
-# 容忍存量违反
-python scripts/ste-lint-zh.py --baseline 20 doc.md
-
-# 关闭某些规则
-python scripts/ste-lint-zh.py --disable passive-voice,noun-cluster doc.md
-
-# 自检（验证"情态词永不触发"等底线）
-python scripts/ste-lint-zh.py --selftest
-```
-
-**Linter 的限制**：
-
-- 它是**正则驱动的启发式**，不是语法分析器。中文没有 POS tagging 做辅助时，`noun-cluster` 规则在长句里会把"X策略"/"Y平台"这类词当成名词簇后缀误触发。遇到误报用 `--disable noun-cluster` 关掉。
-- `passive-voice` 规则是 `advisory`（建议级），永远不计入 `--baseline` 的硬违反数——因为中文的"被 X"合法用法太多，强推会伤真实有效的被动句。
-- **情态词（可能 / 也许 / 或许 / 应该 / 会）永远不会被标记**——这是本 skill 的硬承诺，`--selftest` 把它写进断言。
-- 本仓库自己的 SKILL.md 不 lint 干净，因为规则表引用了反例原文（"不应该"列）。用 `python scripts/ste-lint-zh.py --baseline 60 SKILL.md` 当"把 lint 结果读成示例"用。
-
-## 范围
-
-**适用场景**：Agent 间消息、工具/函数描述、错误信息、系统提示、Agent 间指令、tool call 参数说明——任何中文文本在没有人类消歧的情况下被机器或非母语读者解析的场景。
-
-**不适用场景**：中文营销文案、文学文本、情绪宣传、品牌故事——简化中文规则刻意扁平化、去修辞化，用在这些地方会把文字改成技术手册的腔调。
-
-一个重要前提：本 skill 修的是**形式**，不是**实质**。一段没内容的中文被改写后，还是一段短而干净的空话。
-
-## 鸣谢（Credits）
-
-本仓库受以下项目直接启发，谢意见 [CREDITS.md](CREDITS.md)：
-
-- [`danyuchn/asd-ste100-skill`](https://github.com/danyuchn/asd-ste100-skill) — ASD-STE100 的原始英文 Claude Code skill，本仓库 fork 自此。
-- [ASD-STE100 官方规范](https://www.asd-ste100.org/) — 底层方法论的来源。
-- [`sparanoid/chinese-copywriting-guidelines`](https://github.com/sparanoid/chinese-copywriting-guidelines) — 中文文案排版指北，覆盖本 skill 不处理的排版细节。
-- [`ruanyf/document-style-guide`](https://github.com/ruanyf/document-style-guide) — 阮一峰维护的中文技术文档写作规范。
-- [`conorbronsdon/avoid-ai-writing`](https://github.com/conorbronsdon/avoid-ai-writing) — 同类英文 skill，启发了本仓库的"检测模式 + 评分"输出设计。
-
-## 相关项目
-
-- [`g4lb/asd-ste100-hebrew-skill`](https://github.com/g4lb/asd-ste100-hebrew-skill) — 希伯来语版 ASD-STE100 skill。
-- [`meiluosi/rewrite-fidelity-skill`](https://github.com/meiluosi/rewrite-fidelity-skill) — 对比原文和改写版，标记含义和情态强度的变化。
-
-## 协议
-
-MIT — 见 [LICENSE](LICENSE)。保留 `danyuchn/asd-ste100-skill` 的原始 copyright。
+代码与本仓库文档采用 [MIT License](LICENSE)，保留上游版权声明。引用的外部标准和资料适用各自许可。
